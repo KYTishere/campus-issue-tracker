@@ -40,9 +40,8 @@ const sb = SUPABASE_ENABLED
 
 /* ============================================================
    DATA LAYER
-   Everything goes through "db". Right now it uses localStorage
-   (this device only). Next step: replace these functions with
-   Supabase calls; the screens stay the same.
+   The shared source is Supabase. localStorage is only a temporary
+   UI cache/fallback; issue rows are synchronized from Supabase.
    ============================================================ */
 const STATUSES = ['Reported','In Progress','Resolved','Rejected'];
 const K = {issues:'cit_issues_v2', locs:'cit_locs_v2', cats:'cit_cats_v2', base:'cit_base_v2'};
@@ -163,16 +162,11 @@ async function syncFromSupabase(){
     const rows=data||[];
     const issues=rows.map(rowToIssue);
 
-    /* Generate temporary signed URLs for stored images when possible. */
+    /* Private bucket: create temporary signed URLs for dashboard images. */
     for(const i of issues){
       if(i.photo_url){
-        try{
-          const path=i.photo_url.includes('/storage/v1/object/')
-            ? i.photo_url.split('/storage/v1/object/')[1].split('?')[0].replace(/^public\/issue-photos\//,'')
-            : i.photo_url;
-          const {data:signed}=await sb.storage.from('issue-photos').createSignedUrl(path,3600);
-          if(signed?.signedUrl) i.photo=signed.signedUrl;
-        }catch(e){}
+        const signedUrl=await signedPhotoUrl(i.photo_url);
+        if(signedUrl) i.photo=signedUrl;
       }
     }
 
@@ -184,23 +178,74 @@ async function syncFromSupabase(){
   }
 }
 
-/* Upload a compressed data URL to Supabase Storage and return its public URL/path. */
+/* ============================================================
+   PRIVATE STORAGE HELPERS
+   issue-photos is PRIVATE, so we store the storage PATH and
+   generate a temporary signed URL whenever an image is displayed.
+   ============================================================ */
+function storagePathFromPhotoUrl(value){
+  if(!value) return null;
+  try{
+    const raw=String(value).trim();
+
+    // Already a storage path, e.g. CAMP-2026-1001-123.jpg
+    if(!/^https?:\\/\\//i.test(raw)){
+      return raw.replace(/^\\/+/, '').replace(/^issue-photos\\//,'');
+    }
+
+    const u=new URL(raw);
+    const marker='/storage/v1/object/';
+    const idx=u.pathname.indexOf(marker);
+    if(idx===-1) return null;
+
+    let p=u.pathname.slice(idx + marker.length);
+    // Handles public/authenticated/signed object URL forms.
+    p=p.replace(/^public\\/issue-photos\\//,'');
+    p=p.replace(/^authenticated\\/issue-photos\\//,'');
+    p=p.replace(/^sign\\/issue-photos\\//,'');
+    p=p.replace(/^issue-photos\\//,'');
+    return decodeURIComponent(p);
+  }catch(e){
+    console.warn('Could not determine Storage path:',value,e);
+    return null;
+  }
+}
+
+async function signedPhotoUrl(photoValue){
+  if(!SUPABASE_ENABLED || !photoValue) return null;
+  const path=storagePathFromPhotoUrl(photoValue);
+  if(!path) return null;
+
+  const {data,error}=await sb.storage
+    .from('issue-photos')
+    .createSignedUrl(path,3600);
+
+  if(error){
+    console.error('Signed photo URL failed:',error);
+    return null;
+  }
+  return data?.signedUrl || null;
+}
+
+/* Upload a compressed image to the PRIVATE issue-photos bucket.
+   Return the Storage path, not a public URL. */
 async function uploadPhotoToSupabase(dataUrl, issueId){
   if(!SUPABASE_ENABLED || !dataUrl) return null;
   try{
     const res=await fetch(dataUrl);
     const blob=await res.blob();
     const path=`${issueId}-${Date.now()}.jpg`;
+
     const {error}=await sb.storage.from('issue-photos').upload(path,blob,{
       contentType:'image/jpeg',
       upsert:false
     });
     if(error) throw error;
-    /* Bucket is expected to be public for this first testing version. */
-    const {data}=sb.storage.from('issue-photos').getPublicUrl(path);
-    return data?.publicUrl || path;
+
+    return path;
   }catch(e){
     console.error('Photo upload failed:',e);
+    toast('Photo upload failed. Check Storage upload policy.');
     return null;
   }
 }
@@ -342,7 +387,7 @@ function viewReport(){
       </div>
       <div id="photoName" class="hint" style="margin-top:8px">No photo selected.</div>
       <div id="prev"></div>
-      <div class="hint">For this demo, the compressed photo is stored in this browser. Admin/staff can see it on this device.</div>
+      <div class="hint">Photos are stored securely in Supabase Storage. Staff/admin/principal can view them when authorized.</div>
     </div>
     <div>
       <label>Location</label>
@@ -407,7 +452,7 @@ function viewDash(){
   </div>
   ${list.length ? list.map(i => `
     <button class="issue" data-id="${esc(i.id)}">
-      ${i.photo ? `<img class="thumb" src="${i.photo}" alt="">` : `<div class="thumb">No photo</div>`}
+      ${i.photo ? `<img class="thumb" src="${esc(i.photo)}" alt="Reported issue photo" loading="lazy">` : `<div class="thumb">No photo</div>`}
       <div class="meta">
         <div class="t">${esc(catName(i.cat))} problem <span class="badge ${stClass(i.status)}">${i.status}</span></div>
         <div class="s">${esc(locName(i.loc))}</div>
@@ -427,7 +472,7 @@ function viewDetail(){
     <div><b>Location:</b> ${esc(locName(i.loc))}</div>
     <div><b>Reported:</b> ${when(i.created)}</div>
     <div><b>Description:</b> ${i.desc ? esc(i.desc) : '<span class="hint">None given</span>'}</div>
-    ${i.photo ? `<img class="photo-prev" src="${i.photo}" alt="Photo of the reported problem">` : ''}
+    ${i.photo ? `<img class="photo-prev" src="${esc(i.photo)}" alt="Photo of the reported problem" loading="lazy">` : ''}
     ${can.status() ? `
     <div>
       <label for="note">Update status</label>
@@ -646,10 +691,17 @@ function bindReport(){
     $('#submit').disabled = true;
     $('#submit').textContent = SUPABASE_ENABLED ? 'Uploading…' : 'Saving…';
 
-    /* In Supabase mode, move the image to Storage and save the resulting URL. */
+    /* In Supabase mode, upload the image to private Storage and save its path. */
     if (SUPABASE_ENABLED && issue.photo) {
-      const url = await uploadPhotoToSupabase(issue.photo, issue.id);
-      issue.photo_url = url;
+      const path = await uploadPhotoToSupabase(issue.photo, issue.id);
+      if(!path){
+        db.remove(issue.id);
+        $('#submit').disabled = false;
+        $('#submit').textContent = 'Submit report';
+        $('#err').textContent = 'Photo upload failed. The report was not submitted.';
+        return;
+      }
+      issue.photo_url = path;
       issue.photo = null;
     }
 
@@ -706,7 +758,52 @@ function bindDetail(){
     toast(pt.checked ? 'Shown on public board' : 'Hidden from public board');
   };
   const del = $('#del');
-  if (del) del.onclick = () => { if (confirm('Delete this issue for good?')) { db.remove(S.selected); go('dash'); toast('Issue deleted'); } };
+  if (del) del.onclick = async () => {
+    if (!can.manage()) return;
+    if (!confirm('Delete this issue for good?')) return;
+
+    const issue = db.get(S.selected);
+    if(!issue){
+      toast('Issue not found.');
+      return;
+    }
+
+    del.disabled = true;
+    del.textContent = 'Deleting…';
+
+    try{
+      // Remove the image from private Storage first, if this issue has one.
+      if(SUPABASE_ENABLED && issue.photo_url){
+        const path=storagePathFromPhotoUrl(issue.photo_url);
+        if(path){
+          const {error:storageError}=await sb.storage
+            .from('issue-photos')
+            .remove([path]);
+          if(storageError) throw storageError;
+        }
+      }
+
+      // Remove the actual issue row from the shared Supabase database.
+      if(SUPABASE_ENABLED){
+        const {error:dbError}=await sb
+          .from('issues')
+          .delete()
+          .eq('issue_id',issue.id);
+        if(dbError) throw dbError;
+      }
+
+      // Finally remove the local cache copy.
+      db.remove(issue.id);
+      S.selected=null;
+      go('dash');
+      toast('Issue and photo deleted');
+    }catch(e){
+      console.error('Delete failed:',e);
+      del.disabled = false;
+      del.textContent = 'Delete issue';
+      toast('Delete failed: ' + (e?.message || 'Check Supabase policies.'));
+    }
+  };
 }
 
 function bindPublic(){
