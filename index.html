@@ -189,8 +189,8 @@ function storagePathFromPhotoUrl(value){
     const raw=String(value).trim();
 
     // Already a storage path, e.g. CAMP-2026-1001-123.jpg
-    if(!/^https?:\\/\\//i.test(raw)){
-      return raw.replace(/^\\/+/, '').replace(/^issue-photos\\//,'');
+    if(!/^https?:\/\//i.test(raw)){
+      return raw.replace(/^\/+/, '').replace(/^issue-photos\//,'');
     }
 
     const u=new URL(raw);
@@ -200,10 +200,10 @@ function storagePathFromPhotoUrl(value){
 
     let p=u.pathname.slice(idx + marker.length);
     // Handles public/authenticated/signed object URL forms.
-    p=p.replace(/^public\\/issue-photos\\//,'');
-    p=p.replace(/^authenticated\\/issue-photos\\//,'');
-    p=p.replace(/^sign\\/issue-photos\\//,'');
-    p=p.replace(/^issue-photos\\//,'');
+    p=p.replace(/^public\/issue-photos\//,'');
+    p=p.replace(/^authenticated\/issue-photos\//,'');
+    p=p.replace(/^sign\/issue-photos\//,'');
+    p=p.replace(/^issue-photos\//,'');
     return decodeURIComponent(p);
   }catch(e){
     console.warn('Could not determine Storage path:',value,e);
