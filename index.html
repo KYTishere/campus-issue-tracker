@@ -1,0 +1,815 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Campus Issue Tracker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top"><div class="bar">
+  <div class="brand">Campus Issue Tracker</div>
+  <span class="chip" id="who" hidden></span>
+  <nav id="nav" aria-label="Main"></nav>
+</div></header>
+<main id="app"></main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+/* ============================================================
+   SUPABASE CONNECTION
+   Paste your Supabase publishable/anon key below.
+   NEVER put a service_role/secret key in this file.
+   ============================================================ */
+const SUPABASE_URL = 'https://zbwhneninjwhzqupqrfn.supabase.co';
+const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_wIAyUGDpnZRZ8Dnm4Y143Q_0fzqMN1p';
+const SUPABASE_ENABLED = Boolean(
+  window.supabase &&
+  SUPABASE_URL.startsWith('https://') &&
+  SUPABASE_PUBLISHABLE_KEY &&
+  !SUPABASE_PUBLISHABLE_KEY.includes('PASTE_YOUR_')
+);
+const sb = SUPABASE_ENABLED
+  ? window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY)
+  : null;
+
+
+/* ============================================================
+   DATA LAYER
+   Everything goes through "db". Right now it uses localStorage
+   (this device only). Next step: replace these functions with
+   Supabase calls; the screens stay the same.
+   ============================================================ */
+const STATUSES = ['Reported','In Progress','Resolved','Rejected'];
+const K = {issues:'cit_issues_v2', locs:'cit_locs_v2', cats:'cit_cats_v2', base:'cit_base_v2'};
+const DEF = {
+  cats: [
+    {id:'electrical',name:'Electrical'},{id:'furniture',name:'Furniture'},{id:'water',name:'Water'},
+    {id:'cleanliness',name:'Cleanliness'},{id:'equipment',name:'Equipment'},{id:'safety',name:'Safety'},{id:'other',name:'Other'}
+  ],
+  locs: [
+    {id:'blockA-room204',name:'Block A, Room 204'},{id:'blockA-room205',name:'Block A, Room 205'},
+    {id:'blockA-corridor',name:'Block A, Ground floor corridor'},{id:'blockB-lab1',name:'Block B, Computer Lab 1'},
+    {id:'blockB-washroom',name:'Block B, 1st floor washroom'},{id:'library',name:'Library, Reading hall'},
+    {id:'canteen',name:'Canteen'},{id:'parking',name:'Main parking'}
+  ]
+};
+// Demo logins only. Real version: Supabase Auth with real accounts and roles.
+const ROLES = {
+  admin:     {label:'Admin / developer', pw:'admin123'},
+  staff:     {label:'Staff',             pw:'staff123'},
+  principal: {label:'Principal',         pw:'principal123'}
+};
+const FIELD = {locs:'loc', cats:'cat'};
+const here = location.href.split(/[?#]/)[0];
+
+const store = {
+  read(k, def){
+    try {
+      const v = JSON.parse(localStorage.getItem(k));
+      return v == null ? JSON.parse(JSON.stringify(def)) : v;
+    } catch(e) {
+      return JSON.parse(JSON.stringify(def));
+    }
+  },
+  write(k, v){
+    try { localStorage.setItem(k, JSON.stringify(v)); return true; }
+    catch(e) { return false; }
+  }
+};
+
+/*
+  LOCAL CACHE:
+  The UI stays simple and synchronous. Supabase is the shared source,
+  while localStorage is only a temporary cache/fallback for this demo.
+*/
+const db = {
+  issues(){ return store.read(K.issues, []); },
+  saveIssues(l){ return store.write(K.issues, l); },
+  list(kind){ return store.read(K[kind], DEF[kind]); },
+  saveList(kind,l){ return store.write(K[kind],l); },
+  base(){ return store.read(K.base, here); },
+  saveBase(b){ return store.write(K.base,b); },
+  add(issue){ const l=this.issues(); l.unshift(issue); return this.saveIssues(l); },
+  get(id){ return this.issues().find(i=>i.id===id); },
+  update(id,fn){ const l=this.issues(); const i=l.find(x=>x.id===id); if(!i)return false; fn(i); return this.saveIssues(l); },
+  remove(id){ return this.saveIssues(this.issues().filter(i=>i.id!==id)); },
+  nextId(){
+    const nums=this.issues().map(i=>parseInt(String(i.id).split('-').pop(),10)).filter(n=>!isNaN(n));
+    return 'CAMP-'+new Date().getFullYear()+'-'+((nums.length?Math.max(...nums):1000)+1);
+  }
+};
+
+/* Convert the browser issue object to the Supabase row. */
+function issueToRow(i){
+  return {
+    issue_id: i.id,
+    location: locName(i.loc),
+    category: catName(i.cat),
+    description: i.desc || null,
+    photo_url: i.photo_url || i.photo || null,
+    latitude: i.coords ? i.coords.latitude : null,
+    longitude: i.coords ? i.coords.longitude : null,
+    status: i.status,
+    public: i.public !== false,
+    history: i.history || [],
+    created_at: i.created,
+    updated_at: new Date().toISOString()
+  };
+}
+
+/* Convert a Supabase row back into the shape used by the existing UI. */
+function rowToIssue(r){
+  const locs=db.list('locs');
+  const cats=db.list('cats');
+  let loc=locs.find(x=>x.name===r.location);
+  if(!loc){
+    loc={id:slug(r.location,locs),name:r.location};
+    locs.push(loc); db.saveList('locs',locs);
+  }
+  let cat=cats.find(x=>x.name===r.category);
+  if(!cat){
+    cat={id:slug(r.category,cats),name:r.category};
+    cats.push(cat); db.saveList('cats',cats);
+  }
+  return {
+    id:r.issue_id,
+    loc:loc.id,
+    cat:cat.id,
+    desc:r.description || '',
+    photo:null,
+    photo_url:r.photo_url || null,
+    coords:(r.latitude!=null && r.longitude!=null)
+      ? {latitude:Number(r.latitude),longitude:Number(r.longitude)} : null,
+    status:r.status || 'Reported',
+    created:r.created_at,
+    public:r.public !== false,
+    history:Array.isArray(r.history) && r.history.length
+      ? r.history : [{status:r.status||'Reported',note:'Report submitted',at:r.created_at}]
+  };
+}
+
+/* Refresh the local cache from the shared Supabase database. */
+async function syncFromSupabase(){
+  if(!SUPABASE_ENABLED) return;
+  try{
+    const {data,error}=await sb.from('issues').select('*').order('created_at',{ascending:false});
+    if(error) throw error;
+
+    const rows=data||[];
+    const issues=rows.map(rowToIssue);
+
+    /* Generate temporary signed URLs for stored images when possible. */
+    for(const i of issues){
+      if(i.photo_url){
+        try{
+          const path=i.photo_url.includes('/storage/v1/object/')
+            ? i.photo_url.split('/storage/v1/object/')[1].split('?')[0].replace(/^public\/issue-photos\//,'')
+            : i.photo_url;
+          const {data:signed}=await sb.storage.from('issue-photos').createSignedUrl(path,3600);
+          if(signed?.signedUrl) i.photo=signed.signedUrl;
+        }catch(e){}
+      }
+    }
+
+    db.saveIssues(issues);
+    if(S.view==='public' || S.view==='dash' || S.view==='detail') render();
+  }catch(e){
+    console.error('Supabase sync failed:',e);
+    toast('Supabase sync failed. Check table/policies/key.');
+  }
+}
+
+/* Upload a compressed data URL to Supabase Storage and return its public URL/path. */
+async function uploadPhotoToSupabase(dataUrl, issueId){
+  if(!SUPABASE_ENABLED || !dataUrl) return null;
+  try{
+    const res=await fetch(dataUrl);
+    const blob=await res.blob();
+    const path=`${issueId}-${Date.now()}.jpg`;
+    const {error}=await sb.storage.from('issue-photos').upload(path,blob,{
+      contentType:'image/jpeg',
+      upsert:false
+    });
+    if(error) throw error;
+    /* Bucket is expected to be public for this first testing version. */
+    const {data}=sb.storage.from('issue-photos').getPublicUrl(path);
+    return data?.publicUrl || path;
+  }catch(e){
+    console.error('Photo upload failed:',e);
+    return null;
+  }
+}
+
+/* Push one issue to Supabase. */
+async function pushIssue(issue){
+  if(!SUPABASE_ENABLED) return {ok:true,localOnly:true};
+  try{
+    const row=issueToRow(issue);
+    const {error}=await sb.from('issues').upsert(row,{onConflict:'issue_id'});
+    if(error) throw error;
+    return {ok:true};
+  }catch(e){
+    console.error('Issue upload failed:',e);
+    return {ok:false,error:e};
+  }
+}
+
+/* Update one issue remotely. */
+async function pushIssueUpdate(issue){
+  if(!SUPABASE_ENABLED) return;
+  try{
+    const {error}=await sb.from('issues').update(issueToRow(issue)).eq('issue_id',issue.id);
+    if(error) throw error;
+  }catch(e){
+    console.error('Issue update failed:',e);
+    toast('Saved locally, but Supabase update failed.');
+  }
+}
+
+/* ============================================================
+   HELPERS + STATE
+   ============================================================ */
+const $ = s => document.querySelector(s);
+const esc = t => String(t == null ? '' : t).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const locName = id => (db.list('locs').find(l => l.id === id) || {name: id}).name;
+const catName = id => (db.list('cats').find(c => c.id === id) || {name: id}).name;
+const stClass = s => 'st-' + s.replace(' ', '-');
+const when = iso => new Date(iso).toLocaleString([], {day:'numeric', month:'short', hour:'2-digit', minute:'2-digit'});
+function ago(iso){
+  const m = Math.max(0, Math.round((Date.now() - new Date(iso)) / 60000));
+  if (m < 1) return 'just now'; if (m < 60) return m + ' min ago';
+  const h = Math.round(m / 60); if (h < 48) return h + ' h ago';
+  return Math.round(h / 24) + ' days ago';
+}
+function dur(ms){
+  if (ms == null) return 'No data';
+  const h = ms / 3600e3; if (h < 1) return 'Under 1 hour'; if (h < 48) return Math.round(h) + ' hours';
+  return (h / 24).toFixed(1) + ' days';
+}
+function slug(name, list){
+  const b = name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'') || 'item';
+  let id = b, n = 2; while (list.some(x => x.id === id)) id = b + '-' + n++; return id;
+}
+function toast(msg){
+  const t = document.createElement('div'); t.className = 'toast'; t.textContent = msg; t.setAttribute('role','status');
+  document.body.appendChild(t); setTimeout(() => t.remove(), 3200);
+}
+function stats(list){
+  const res = list.filter(i => i.status === 'Resolved');
+  const times = res.map(i => { const h = i.history.slice().reverse().find(x => x.status === 'Resolved'); return h ? new Date(h.at) - new Date(i.created) : null; })
+                   .filter(x => x != null && x >= 0);
+  return {
+    total: list.length,
+    reported: list.filter(i => i.status === 'Reported').length,
+    progress: list.filter(i => i.status === 'In Progress').length,
+    open: list.filter(i => i.status === 'Reported' || i.status === 'In Progress').length,
+    resolved: res.length,
+    avg: times.length ? times.reduce((a,b) => a + b, 0) / times.length : null
+  };
+}
+function countBy(list, field, nameFn){
+  const m = {}; list.forEach(i => m[i[field]] = (m[i[field]] || 0) + 1);
+  return Object.entries(m).map(([k,v]) => [nameFn(k), v]).sort((a,b) => b[1] - a[1]).slice(0,5);
+}
+function bars(arr){
+  if (!arr.length) return '<div class="hint">No data yet.</div>';
+  const max = arr[0][1];
+  return arr.map(([l,v]) => `<div class="brow"><span>${esc(l)}</span><div class="track"><div class="fill" style="width:${Math.round(v/max*100)}%"></div></div><b>${v}</b></div>`).join('');
+}
+
+const params = new URLSearchParams(location.search);
+const qrLoc = db.list('locs').some(l => l.id === params.get('loc')) ? params.get('loc') : null;
+const S = { view: params.get('view') === 'public' ? 'public' : 'report', role: null, selected: null,
+            loc: qrLoc, photo: null, lastId: null, fStatus: 'All', fCat: 'All', pf: 'All', pq: '' };
+const can = {
+  status: () => S.role === 'admin' || S.role === 'staff',
+  manage: () => S.role === 'admin'
+};
+function go(view){ S.view = view; render(); window.scrollTo(0,0); }
+
+/* ============================================================
+   NAVIGATION
+   ============================================================ */
+function renderNav(){
+  const items = [['report','Report an issue'], ['public','Public board']];
+  if (S.role) {
+    items.push(['dash','Dashboard']);
+    if (can.manage()) items.push(['manage','Manage'], ['qrs','QR codes']);
+    items.push(['logout','Log out']);
+  } else items.push(['login','Staff login']);
+  const active = {done:'report', detail:'dash'}[S.view] || S.view;
+  $('#nav').innerHTML = items.map(([v,l]) => `<button data-v="${v}" ${active === v ? 'aria-current="true"' : ''}>${l}</button>`).join('');
+  $('#nav').querySelectorAll('button').forEach(b => b.onclick = () => {
+    if (b.dataset.v === 'logout'){ S.role = null; go('report'); toast('Logged out'); } else go(b.dataset.v);
+  });
+  const who = $('#who'); who.hidden = !S.role; who.textContent = S.role ? ROLES[S.role].label : '';
+}
+
+/* ============================================================
+   VIEWS
+   ============================================================ */
+function viewReport(){
+  const locs = db.list('locs'), cats = db.list('cats');
+  const locked = qrLoc && locs.some(l => l.id === qrLoc);
+  return `
+  <h1>Report a problem</h1>
+  <p class="lead">Takes under a minute. No name or phone number needed.</p>
+  <div class="live"><span class="dot" aria-hidden="true"></span><span id="currentTime"></span></div>
+  <div class="card stack">
+    <div>
+      <label for="loc">Where is the problem?</label>
+      ${locked
+        ? `<div class="loc-pin">${esc(locName(qrLoc))}</div><div class="hint">Location filled in from the QR code you scanned.</div>`
+        : `<select id="loc"><option value="">Choose a location</option>${locs.map(l => `<option value="${esc(l.id)}" ${S.loc===l.id?'selected':''}>${esc(l.name)}</option>`).join('')}</select>
+           <div class="hint">When you scan a QR code on campus, this is filled in for you.</div>`}
+    </div>
+    <div>
+      <label for="cat">What kind of problem is it?</label>
+      <select id="cat"><option value="">Choose a category</option>${cats.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}</select>
+    </div>
+    <div>
+      <label>Photo (optional)</label>
+      <input id="cameraPhoto" type="file" accept="image/*" capture="environment" hidden>
+      <input id="galleryPhoto" type="file" accept="image/*" hidden>
+      <div class="row">
+        <button type="button" class="btn ghost" id="cameraBtn">📷 Take photo</button>
+        <button type="button" class="btn ghost" id="galleryBtn">🖼️ Choose photo</button>
+      </div>
+      <div id="photoName" class="hint" style="margin-top:8px">No photo selected.</div>
+      <div id="prev"></div>
+      <div class="hint">For this demo, the compressed photo is stored in this browser. Admin/staff can see it on this device.</div>
+    </div>
+    <div>
+      <label>Location</label>
+      <div class="row">
+        <span id="gpsStatus" class="hint">GPS: not requested yet</span>
+        <button type="button" class="btn ghost small" id="gpsBtn">Use my location</button>
+      </div>
+    </div>
+    <div>
+      <label for="desc">Description (optional)</label>
+      <textarea id="desc" maxlength="300" placeholder="Example: Ceiling fan makes a loud noise when switched on"></textarea>
+      <div class="hint">The description can appear on the public board. Please don't write names.</div>
+    </div>
+    <div class="row"><button class="btn" id="submit">Submit report</button><span class="hint" id="err" role="alert"></span></div>
+  </div>`;
+}
+
+function viewDone(){
+  return `
+  <div class="card stack">
+    <h1>Report submitted</h1>
+    <p class="lead" style="margin:0">Your issue ID is <b>${esc(S.lastId)}</b>. Search for it on the public board to follow progress.</p>
+    <div class="row"><button class="btn" id="again">Report another issue</button><button class="btn ghost" id="toPub">Open public board</button></div>
+  </div>`;
+}
+
+function viewLogin(){
+  return `
+  <h1>Staff login</h1>
+  <p class="lead">For admin, staff and the principal.</p>
+  <div class="card stack" style="max-width:440px">
+    <div><label for="role">Sign in as</label>
+      <select id="role">${Object.entries(ROLES).map(([k,r]) => `<option value="${k}">${r.label}</option>`).join('')}</select></div>
+    <div><label for="pw">Password</label><input id="pw" type="password" autocomplete="current-password"></div>
+    <div class="row"><button class="btn" id="loginBtn">Log in</button><span class="hint" id="err" role="alert"></span></div>
+    <div class="warn">Demo passwords: admin123, staff123, principal123. The real version will use proper accounts.</div>
+    <div class="warn">${SUPABASE_ENABLED ? 'Supabase connection is enabled for this test build.' : 'Supabase is not connected yet. Add the publishable key at the top of index.html.'}</div>
+  </div>`;
+}
+
+function viewDash(){
+  const all = db.issues(), s = stats(all), cats = db.list('cats');
+  const list = all.filter(i => (S.fStatus === 'All' || i.status === S.fStatus) && (S.fCat === 'All' || i.cat === S.fCat));
+  const note = S.role === 'principal' ? 'You have view-only access.' : S.role === 'staff' ? 'You can update issue status. Settings are admin only.' : 'You have full access.';
+  return `
+  <h1>Dashboard</h1>
+  <p class="lead">${note}</p>
+  <div class="warn" style="margin-bottom:16px">${SUPABASE_ENABLED ? '🟢 Supabase connected: this browser syncs reports with the shared database.' : '🟡 Supabase not configured: this browser stores reports/photos locally. Paste your publishable key in the configuration at the top of index.html.'}</div>
+  <div class="stats">
+    <div class="stat"><b>${s.total}</b><span>Total issues</span></div>
+    <div class="stat"><b>${s.open}</b><span>Open</span></div>
+    <div class="stat"><b>${s.resolved}</b><span>Resolved</span></div>
+    <div class="stat"><b style="font-size:1.2rem;padding:6px 0">${dur(s.avg)}</b><span>Average time to fix</span></div>
+  </div>
+  <div class="cols">
+    <div class="card"><h2>Issues by category</h2>${bars(countBy(all,'cat',catName))}</div>
+    <div class="card"><h2>Issues by location</h2>${bars(countBy(all,'loc',locName))}</div>
+  </div>
+  <div class="row" style="margin-bottom:14px">
+    <select id="fs" aria-label="Filter by status" style="width:auto"><option>All</option>${STATUSES.map(x => `<option ${S.fStatus===x?'selected':''}>${x}</option>`).join('')}</select>
+    <select id="fc" aria-label="Filter by category" style="width:auto"><option value="All">All</option>${cats.map(c => `<option value="${esc(c.id)}" ${S.fCat===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}</select>
+  </div>
+  ${list.length ? list.map(i => `
+    <button class="issue" data-id="${esc(i.id)}">
+      ${i.photo ? `<img class="thumb" src="${i.photo}" alt="">` : `<div class="thumb">No photo</div>`}
+      <div class="meta">
+        <div class="t">${esc(catName(i.cat))} problem <span class="badge ${stClass(i.status)}">${i.status}</span></div>
+        <div class="s">${esc(locName(i.loc))}</div>
+        <div class="s">${esc(i.id)}, ${when(i.created)}${i.public === false ? ', hidden from public' : ''}</div>
+      </div>
+    </button>`).join('') : `<div class="card">No issues match. ${can.manage() ? 'Add sample issues from the Manage page.' : ''}</div>`}`;
+}
+
+function viewDetail(){
+  const i = db.get(S.selected);
+  if (!i) return `<div class="card">Issue not found.</div>`;
+  return `
+  <p><button class="btn ghost small" id="back">Back to dashboard</button></p>
+  <div class="card stack">
+    <div><h1>${esc(catName(i.cat))} problem</h1>
+      <div class="row"><b>${esc(i.id)}</b><span class="badge ${stClass(i.status)}">${i.status}</span></div></div>
+    <div><b>Location:</b> ${esc(locName(i.loc))}</div>
+    <div><b>Reported:</b> ${when(i.created)}</div>
+    <div><b>Description:</b> ${i.desc ? esc(i.desc) : '<span class="hint">None given</span>'}</div>
+    ${i.photo ? `<img class="photo-prev" src="${i.photo}" alt="Photo of the reported problem">` : ''}
+    ${can.status() ? `
+    <div>
+      <label for="note">Update status</label>
+      <input id="note" type="text" maxlength="120" placeholder="Note, for example: Electrician will visit tomorrow">
+      <div class="hint">Notes appear on the public board. Keep them short and polite.</div>
+      <div class="row" style="margin-top:10px">
+        ${STATUSES.map(x => `<button class="btn small ${x===i.status?'':'ghost'}" data-st="${x}">${x}</button>`).join('')}
+      </div>
+    </div>` : `<div class="warn">View-only access. Staff or admin can change the status.</div>`}
+    ${can.manage() ? `
+    <div class="row" style="justify-content:space-between">
+      <label class="inline"><input type="checkbox" id="pubToggle" ${i.public !== false ? 'checked' : ''}> Show on public board</label>
+      <button class="btn danger small" id="del">Delete issue</button>
+    </div>` : ''}
+    <div><h2>History</h2>
+      <ul class="history">${i.history.slice().reverse().map(h => `<li><b>${h.status}</b> <span class="hint">${when(h.at)}</span>${h.note ? `<div>${esc(h.note)}</div>` : ''}</li>`).join('')}</ul>
+    </div>
+  </div>`;
+}
+
+function viewPublic(){
+  return `
+  <h1>Campus issues, live</h1>
+  <p class="lead">Problems reported on campus and what is being done about them.</p>
+  <div class="live"><span class="dot" aria-hidden="true"></span><span id="stamp"></span></div>
+  <div class="row" style="margin-bottom:14px">
+    <input type="text" id="pq" placeholder="Search by issue ID, place or category" aria-label="Search issues" value="${esc(S.pq)}" style="flex:1 1 240px;width:auto">
+    <select id="pf" aria-label="Filter by status" style="width:auto"><option>All</option>${['Reported','In Progress','Resolved'].map(x => `<option ${S.pf===x?'selected':''}>${x}</option>`).join('')}</select>
+  </div>
+  <div id="pubBody"></div>`;
+}
+function pubBody(){
+  const base = db.issues().filter(i => i.public !== false && i.status !== 'Rejected');
+  const s = stats(base), q = S.pq.trim().toLowerCase();
+  const list = base.filter(i => (S.pf === 'All' || i.status === S.pf) &&
+    (!q || (i.id + ' ' + locName(i.loc) + ' ' + catName(i.cat)).toLowerCase().includes(q)));
+  return `
+  <div class="stats">
+    <div class="stat"><b>${s.reported}</b><span>Reported</span></div>
+    <div class="stat"><b>${s.progress}</b><span>Being fixed</span></div>
+    <div class="stat"><b>${s.resolved}</b><span>Resolved</span></div>
+    <div class="stat"><b style="font-size:1.2rem;padding:6px 0">${dur(s.avg)}</b><span>Average time to fix</span></div>
+  </div>
+  ${list.length ? list.map(i => {
+    const last = i.history[i.history.length - 1];
+    return `<div class="pub-item">
+      <div class="row"><span class="badge ${stClass(i.status)}">${i.status}</span><b>${esc(catName(i.cat))}</b></div>
+      <div>${esc(locName(i.loc))}</div>
+      ${i.desc ? `<div class="hint">${esc(i.desc.slice(0,120))}</div>` : ''}
+      ${last && last.note && last.status !== 'Reported' ? `<div class="hint">Update: ${esc(last.note)}</div>` : ''}
+      <div class="hint">${esc(i.id)}, reported ${ago(i.created)}</div>
+    </div>`; }).join('') : `<div class="card">No issues to show.</div>`}`;
+}
+function refreshPublic(){
+  if (S.view !== 'public' || !$('#pubBody')) return;
+  $('#pubBody').innerHTML = pubBody();
+  $('#stamp').textContent = 'Live. Updated ' + new Date().toLocaleString([], {dateStyle:'medium', timeStyle:'medium'});
+}
+
+function viewManage(){
+  const issues = db.issues();
+  const sec = (kind, title, items, ph) => `
+  <div class="card stack">
+    <h2>${title}</h2>
+    <div>${items.map(x => `
+      <div class="edit-row" data-kind="${kind}" data-id="${esc(x.id)}">
+        <input type="text" value="${esc(x.name)}" maxlength="60" aria-label="${title} name">
+        <button class="btn small" data-act="save">Save</button>
+        <button class="btn ghost small" data-act="del">Delete</button>
+        <span class="hint">${issues.filter(i => i[FIELD[kind]] === x.id).length} issues</span>
+      </div>`).join('')}</div>
+    <div class="edit-row"><input type="text" id="new-${kind}" placeholder="${ph}" maxlength="60" aria-label="New name"><button class="btn small" data-add="${kind}">Add</button></div>
+  </div>`;
+  return `
+  <h1>Manage</h1>
+  <p class="lead">Admin only. Changes apply everywhere straight away.</p>
+  <div class="stack">
+    ${sec('locs','Locations', db.list('locs'), 'Example: Block C, Room 101')}
+    <div class="warn">Renaming a location keeps its QR code working, because the code stores a fixed ID, not the name.</div>
+    ${sec('cats','Categories', db.list('cats'), 'Example: Internet')}
+    <div class="card stack">
+      <h2>Demo data</h2>
+      <div class="row"><button class="btn ghost small" id="sample">Add sample issues</button><button class="btn danger small" id="reset">Delete all issues</button></div>
+    </div>
+  </div>`;
+}
+
+function viewQrs(){
+  const base = db.base();
+  const item = (title, path) => `<div class="qr-item"><div class="qr" data-path="${esc(path)}"></div><b>${esc(title)}</b><div class="u"></div><button class="btn ghost small noprint" data-save>Save image</button></div>`;
+  return `
+  <h1>QR codes</h1>
+  <p class="lead">Optional until the site is hosted. Print one for each place and stick it there.</p>
+  <div class="card stack noprint" style="margin-bottom:16px">
+    <div><label for="base">Website address</label>
+      <input id="base" type="text" value="${esc(base)}" placeholder="https://your-project.vercel.app">
+      <div class="hint">After you host the site, paste its real address here. Every code below updates.</div></div>
+    ${/^https?:\/\//.test(base) ? '' : '<div class="warn">This address does not start with http or https, so phones cannot open it yet.</div>'}
+    <div class="row"><button class="btn small" id="applyBase">Update QR codes</button><button class="btn ghost small" id="print">Print all</button></div>
+    <div class="hint">If "Save image" does nothing, press and hold the code and choose Save image.</div>
+  </div>
+  <h2>Public board</h2>
+  <div class="qr-grid" style="margin-bottom:20px">${item('Live public board', '?view=public')}</div>
+  <h2>Locations</h2>
+  <div class="qr-grid">${db.list('locs').map(l => item(l.name, '?loc=' + encodeURIComponent(l.id))).join('')}</div>`;
+}
+
+/* ============================================================
+   BINDINGS
+   ============================================================ */
+function compressImage(file, cb){
+  const reader = new FileReader();
+  reader.onload = () => {
+    const img = new Image();
+    img.onload = () => {
+      const r = Math.min(1, 800 / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.width * r); c.height = Math.round(img.height * r);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      cb(c.toDataURL('image/jpeg', 0.7));
+    };
+    img.onerror = () => cb(null);
+    img.src = reader.result;
+  };
+  reader.onerror = () => cb(null);
+  reader.readAsDataURL(file);
+}
+
+function bindReport(){
+  const sel = $('#loc');
+  if (sel) sel.onchange = () => S.loc = sel.value;
+
+  const processPhoto = (f) => {
+    if (!f) return;
+    if (!f.type.startsWith('image/')) {
+      $('#err').textContent = 'Please choose an image file.';
+      return;
+    }
+    compressImage(f, data => {
+      if (!data) {
+        $('#err').textContent = 'That file could not be read as an image.';
+        return;
+      }
+      S.photo = data;
+      $('#photoName').textContent = f.name || 'Photo selected';
+      $('#prev').innerHTML = `<img class="photo-prev" src="${data}" alt="Preview of your photo">`;
+      $('#err').textContent = '';
+    });
+  };
+
+  $('#cameraBtn').onclick = () => $('#cameraPhoto').click();
+  $('#galleryBtn').onclick = () => $('#galleryPhoto').click();
+  $('#cameraPhoto').onchange = e => processPhoto(e.target.files[0]);
+  $('#galleryPhoto').onchange = e => processPhoto(e.target.files[0]);
+
+  let coords = null;
+  const updateGpsText = (msg) => {
+    const el = $('#gpsStatus');
+    if (el) el.textContent = msg;
+  };
+
+  $('#gpsBtn').onclick = () => {
+    if (!navigator.geolocation) {
+      updateGpsText('GPS: not supported by this browser');
+      return;
+    }
+    updateGpsText('GPS: requesting permission…');
+    navigator.geolocation.getCurrentPosition(
+      p => {
+        coords = {
+          latitude: p.coords.latitude,
+          longitude: p.coords.longitude,
+          accuracy: p.coords.accuracy
+        };
+        updateGpsText(`GPS: captured (±${Math.round(p.coords.accuracy)} m)`);
+      },
+      () => updateGpsText('GPS: permission denied/unavailable'),
+      {enableHighAccuracy:true, timeout:10000, maximumAge:60000}
+    );
+  };
+
+  const clock = () => {
+    const el = $('#currentTime');
+    if (el) el.textContent = 'Current device time: ' + new Date().toLocaleString();
+  };
+  clock();
+  const clockTimer = setInterval(clock, 1000);
+
+  $('#submit').onclick = async () => {
+    const cat = $('#cat').value, desc = $('#desc').value.trim();
+    const loc = qrLoc && db.list('locs').some(l => l.id === qrLoc) ? qrLoc : S.loc;
+    if (!loc) { $('#err').textContent = 'Choose where the problem is.'; return; }
+    if (!cat) { $('#err').textContent = 'Choose a category.'; return; }
+
+    // ISO timestamp comes from the device's current clock.
+    const now = new Date().toISOString();
+    const issue = {
+      id: db.nextId(),
+      loc,
+      cat,
+      desc,
+      photo: S.photo,
+      coords,
+      status: 'Reported',
+      created: now,
+      public: true,
+      history: [{status:'Reported', note:'Report submitted', at: now}]
+    };
+
+    /* Save locally first so the UI is responsive. */
+    if (!db.add(issue)) {
+      $('#err').textContent = 'Browser storage is full. Remove old demo issues or use a smaller photo.';
+      return;
+    }
+
+    $('#submit').disabled = true;
+    $('#submit').textContent = SUPABASE_ENABLED ? 'Uploading…' : 'Saving…';
+
+    /* In Supabase mode, move the image to Storage and save the resulting URL. */
+    if (SUPABASE_ENABLED && issue.photo) {
+      const url = await uploadPhotoToSupabase(issue.photo, issue.id);
+      issue.photo_url = url;
+      issue.photo = null;
+    }
+
+    const pushed = await pushIssue(issue);
+    if (!pushed.ok) {
+      $('#submit').disabled = false;
+      $('#submit').textContent = 'Submit report';
+      $('#err').textContent = 'The report was saved locally, but could not reach Supabase. Check your key/table policies.';
+      return;
+    }
+
+    /* Keep the local copy aligned with the remote row. */
+    db.update(issue.id, i => {
+      i.photo_url = issue.photo_url || null;
+      i.photo = issue.photo || null;
+    });
+
+    clearInterval(clockTimer);
+    S.lastId = issue.id;
+    S.photo = null;
+    go('done');
+  };
+}
+function bindLogin(){
+  const doLogin = () => {
+    const r = $('#role').value;
+    if ($('#pw').value === ROLES[r].pw) { S.role = r; go('dash'); toast('Signed in as ' + ROLES[r].label); }
+    else $('#err').textContent = 'Wrong password. Try again.';
+  };
+  $('#loginBtn').onclick = doLogin;
+  $('#pw').onkeydown = e => { if (e.key === 'Enter') doLogin(); };
+}
+
+function bindDash(){
+  $('#fs').onchange = e => { S.fStatus = e.target.value; render(); };
+  $('#fc').onchange = e => { S.fCat = e.target.value; render(); };
+  document.querySelectorAll('.issue').forEach(b => b.onclick = () => { S.selected = b.dataset.id; go('detail'); });
+}
+
+function bindDetail(){
+  $('#back').onclick = () => go('dash');
+  document.querySelectorAll('[data-st]').forEach(b => b.onclick = async () => {
+    if (!can.status()) return;
+    const note = $('#note').value.trim(), st = b.dataset.st;
+    db.update(S.selected, i => { i.status = st; i.history.push({status: st, note, at: new Date().toISOString()}); });
+    const changed = db.get(S.selected);
+    await pushIssueUpdate(changed);
+    render(); toast('Status changed to ' + st);
+  });
+  const pt = $('#pubToggle');
+  if (pt) pt.onchange = async () => {
+    db.update(S.selected, i => i.public = pt.checked);
+    await pushIssueUpdate(db.get(S.selected));
+    toast(pt.checked ? 'Shown on public board' : 'Hidden from public board');
+  };
+  const del = $('#del');
+  if (del) del.onclick = () => { if (confirm('Delete this issue for good?')) { db.remove(S.selected); go('dash'); toast('Issue deleted'); } };
+}
+
+function bindPublic(){
+  $('#pq').oninput = e => { S.pq = e.target.value; refreshPublic(); };
+  $('#pf').onchange = e => { S.pf = e.target.value; refreshPublic(); };
+  refreshPublic();
+}
+
+function addSamples(){
+  const locs = db.list('locs'), cats = db.list('cats');
+  const cid = id => (cats.find(c => c.id === id) || cats[0]).id;
+  const lid = k => locs[k % locs.length].id;
+  [[0,'electrical','Ceiling fan makes a loud noise when switched on','Reported'],
+   [4,'water','Tap is leaking and water is collecting on the floor','In Progress'],
+   [5,'furniture','Two chairs in the reading hall have broken legs','Reported'],
+   [3,'equipment','Projector does not turn on','Resolved'],
+   [6,'cleanliness','Dustbins are overflowing near the seating area','Reported']
+  ].forEach(([l,c,desc,status], k) => {
+    const created = new Date(Date.now() - (k+1) * 7 * 3600e3).toISOString();
+    const history = [{status:'Reported', note:'Report submitted', at: created}];
+    if (status !== 'Reported') history.push({status, note: status === 'Resolved' ? 'Fixed by IT team' : 'Plumber has been informed', at: new Date().toISOString()});
+    db.add({ id: db.nextId(), loc: lid(l), cat: cid(c), desc, photo: null, status, created, public: true, history });
+  });
+}
+
+function bindManage(){
+  document.querySelectorAll('.edit-row[data-kind]').forEach(row => {
+    const kind = row.dataset.kind, id = row.dataset.id;
+    row.querySelector('[data-act=save]').onclick = () => {
+      const name = row.querySelector('input').value.trim();
+      if (!name) { toast('Name cannot be empty'); return; }
+      const list = db.list(kind); list.find(x => x.id === id).name = name;
+      db.saveList(kind, list); render(); toast('Saved');
+    };
+    row.querySelector('[data-act=del]').onclick = () => {
+      const n = db.issues().filter(i => i[FIELD[kind]] === id).length;
+      if (n) { toast('Used by ' + n + ' issue(s). Rename it instead.'); return; }
+      const list = db.list(kind);
+      if (list.length <= 1) { toast('Keep at least one.'); return; }
+      if (!confirm('Delete this item?')) return;
+      db.saveList(kind, list.filter(x => x.id !== id)); render(); toast('Deleted');
+    };
+  });
+  document.querySelectorAll('[data-add]').forEach(b => b.onclick = () => {
+    const kind = b.dataset.add, name = $('#new-' + kind).value.trim();
+    if (!name) { toast('Type a name first'); return; }
+    const list = db.list(kind); list.push({id: slug(name, list), name});
+    db.saveList(kind, list); render(); toast('Added');
+  });
+  $('#sample').onclick = () => { addSamples(); render(); toast('Sample issues added'); };
+  $('#reset').onclick = () => { if (confirm('Delete all issues on this device?')) { db.saveIssues([]); render(); toast('All issues deleted'); } };
+}
+
+function bindQrs(){
+  const draw = () => {
+    const base = ($('#base').value.trim() || here).replace(/[?#].*$/, '');
+    document.querySelectorAll('.qr').forEach(el => {
+      const url = base + el.dataset.path;
+      el.innerHTML = '';
+      try { new QRCode(el, { text: url, width: 160, height: 160, correctLevel: QRCode.CorrectLevel.M }); }
+      catch(e){ el.textContent = 'QR library did not load'; }
+      el.parentElement.querySelector('.u').textContent = url;
+    });
+  };
+  draw();
+  $('#applyBase').onclick = () => { db.saveBase($('#base').value.trim() || here); render(); toast('QR codes updated'); };
+  $('#print').onclick = () => window.print();
+  document.querySelectorAll('[data-save]').forEach(b => b.onclick = () => {
+    const box = b.parentElement, img = box.querySelector('img'), cv = box.querySelector('canvas');
+    const data = (img && img.src.startsWith('data:')) ? img.src : (cv ? cv.toDataURL('image/png') : null);
+    if (!data) { toast('Press and hold the code to save it'); return; }
+    const a = document.createElement('a'); a.href = data;
+    a.download = box.querySelector('b').textContent.replace(/[^a-z0-9]+/gi,'-').toLowerCase() + '-qr.png';
+    document.body.appendChild(a); a.click(); a.remove();
+  });
+}
+
+/* ============================================================
+   RENDER
+   ============================================================ */
+function render(){
+  if ((S.view === 'manage' || S.view === 'qrs') && !can.manage()) S.view = S.role ? 'dash' : 'login';
+  if ((S.view === 'dash' || S.view === 'detail') && !S.role) S.view = 'login';
+  const views = { report: viewReport, done: viewDone, login: viewLogin, dash: viewDash, detail: viewDetail,
+                  public: viewPublic, manage: viewManage, qrs: viewQrs };
+  $('#app').innerHTML = views[S.view]();
+  renderNav();
+  if (S.view === 'report') bindReport();
+  if (S.view === 'done') { $('#again').onclick = () => go('report'); $('#toPub').onclick = () => go('public'); }
+  if (S.view === 'login') bindLogin();
+  if (S.view === 'dash') bindDash();
+  if (S.view === 'detail') bindDetail();
+  if (S.view === 'public') bindPublic();
+  if (S.view === 'manage') bindManage();
+  if (S.view === 'qrs') bindQrs();
+}
+setInterval(refreshPublic, 5000);          // live refresh of the public board
+window.addEventListener('storage', refreshPublic); // updates when another tab on this device changes data
+render();
+if (SUPABASE_ENABLED) {
+  setTimeout(syncFromSupabase, 100);
+  setInterval(syncFromSupabase, 10000);
+}
+</script>
+</body>
+</html>
