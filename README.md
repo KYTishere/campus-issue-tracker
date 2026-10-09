@@ -1,51 +1,40 @@
-# Campus Issue Tracker — GitHub Pages Demo
+# Campus Issue Tracker — Refactored Prototype
 
-## Current version
-- QR/location-aware issue reporting
-- Camera or gallery photo selection
-- Image compression before storage
-- Current device date/time
-- Optional browser GPS capture
-- Anonymous-style report form (no name/phone field)
-- Admin/staff/principal demo login
-- Issue status tracking
-- Public board
-- Local demo storage
+## Files
+- `index.html`: page shell and external library links.
+- `style.css`: responsive styling and theme.
+- `app.js`: application logic, Supabase access, report flow, dashboard, QR codes and prototype account settings.
 
-## IMPORTANT: how data is stored right now
-This is a static HTML demo. Reports and compressed photos are stored in the browser's `localStorage`.
+## Fixes in this version
+- Supabase polling no longer rebuilds the whole interface every 10 seconds when the database rows have not changed.
+- If remote data changes while a text field is focused, the render is postponed until the user finishes typing.
+- Status notes can be saved with Enter or the **Save note** button without changing status. Status buttons still save the note together with the selected status.
+- Removed the GPS control and GPS capture code. QR location prefill remains.
+- Demo role session can persist in the current browser; users can log out.
+- Account settings allow changing the current demo role password after checking the previous password.
+- Private Storage photo signed URLs remain supported.
 
-That means:
-- Data is available only in that browser/device/origin.
-- Opening the site on another phone does NOT show the same reports.
-- Clearing browser/site data can remove the demo data.
-- GitHub Pages hosts the files; it is NOT the database.
+## Important security limitation
+This is still a **prototype**, not production authentication. The demo role passwords and role selection are controlled by front-end JavaScript. Browser-local password changes only apply in that browser and do not securely update a central account. Do not use this as real access control for campus data. Before real deployment, replace the demo login/account screen with Supabase Auth, add a role mapping enforced by PostgreSQL RLS, and configure least-privilege Storage policies. Never put a Supabase service-role/secret key in browser code.
 
-## Next step for a real college system
-Replace the `store`/`db` functions with a shared backend such as:
-- Supabase PostgreSQL for issue data
-- Supabase Storage for photos
-- Supabase Auth for admin/staff accounts
-- Row Level Security for permissions
+## Supabase configuration
+At the top of `app.js`, find `SUPABASE CONNECTION`. Keep the project URL and publishable/anon key only. Do not add a service-role/secret key.
 
-The frontend screens can remain largely the same.
+## Test checklist
+1. Submit a report without a photo.
+2. Submit a report with a photo and verify both the Storage object and `issues.photo_url` path.
+3. Open the dashboard and verify the photo displays from the private bucket.
+4. Open an issue, type a note and press Enter; confirm the note remains in history.
+5. Type in the note field for longer than 10 seconds; verify it is not erased.
+6. Change status with a note and verify the status/history in Supabase.
+7. Hide an issue and verify public-board behavior.
+8. Delete a disposable test issue and confirm both its row and photo object are removed.
+9. Sign in, reload the page, and verify session persistence; log out and verify access is cleared.
+10. Change the demo password in Account settings and confirm the old password no longer works in that same browser.
 
-## GitHub Pages
-Upload `index.html` and `style.css` to a repository and enable GitHub Pages.
+## Default demo passwords
+- Admin: `admin123`
+- Staff: `staff123`
+- Principal: `principal123`
 
-The QR-code page already allows the hosted website base URL to be entered so location QR codes can point to the real site.
-
-## Security note
-The passwords in this demo are only demo passwords. Do NOT use them for a real deployment.
-
-## Supabase connection added
-This build is prepared for the Supabase project used by the team.
-
-1. In `index.html`, replace `PASTE_YOUR_SUPABASE_PUBLISHABLE_KEY_HERE` with the project's publishable key.
-2. Run `supabase_migration.sql` in Supabase SQL Editor.
-3. Create a Storage bucket named `issue-photos` and make it PUBLIC for this test version.
-4. Run `storage_test_policies.sql`.
-5. Push `index.html` and `style.css` to GitHub Pages.
-6. Submit a complaint from one device, then open the site on another device. The same database record should appear.
-
-IMPORTANT: The SQL policies in this test version intentionally allow anonymous reads/updates/deletes. This is ONLY for learning/testing. Before real college use, replace them with proper Supabase Auth + role-based RLS and a private photo bucket.
+These are public demo defaults. Change them for local testing, but remember this does not secure the website. Use Supabase Auth for real users.
